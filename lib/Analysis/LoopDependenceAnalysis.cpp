@@ -137,7 +137,7 @@ bool LoopDependenceAnalysis::findOrInsertDependencePair(Value *A,
 void LoopDependenceAnalysis::getLoops(const SCEV *S,
                                       DenseSet<const Loop*>* Loops) const {
   // Refactor this into an SCEVVisitor, if efficiency becomes a concern.
-  for (const Loop *L = this->L; L != 0; L = L->getParentLoop())
+  for (Loop *L = this->L; L != 0; L = L->getParentLoop())
     if (!SE->isLoopInvariant(S, L))
       Loops->insert(L);
 }
@@ -148,94 +148,354 @@ bool LoopDependenceAnalysis::isLoopInvariant(const SCEV *S) const {
   return loops.empty();
 }
 
-bool LoopDependenceAnalysis::isAffine(const SCEV *S) const {
-  const SCEVAddRecExpr *rec = dyn_cast<SCEVAddRecExpr>(S);
-  return isLoopInvariant(S) || (rec && rec->isAffine());
+bool LoopDependenceAnalysis::analyseZIV(const SCEV *A, const SCEV *B,
+                                        Subscript *S) const {
+  if (isLoopInvariant(A) && isLoopInvariant(B)) {
+    if (A == B) {
+      S->Kind = Subscript::Dependent;
+      S->Direction = Subscript::EQ;
+      S->Distance = GetZeroSCEV(SE);
+    } else {
+      S->Kind = Subscript::Independent;
+    }
+    return true;
+  }
+
+  return false;
 }
 
-bool LoopDependenceAnalysis::isZIVPair(const SCEV *A, const SCEV *B) const {
-  return isLoopInvariant(A) && isLoopInvariant(B);
+bool
+LoopDependenceAnalysis::getLinearExpression(const SCEV *X, const SCEV **xCoeff,
+                                            const SCEV **xConst,
+                                            const Loop **loop) const {
+  // We try to fill in xCoeff and xConst such that X = (*xConst) + (*xCoeff) * I
+  // where I is the loop induction variable.
+  if (const SCEVAddRecExpr *addRecExp = dyn_cast<SCEVAddRecExpr>(X)) {
+    *xCoeff = addRecExp->getStepRecurrence(*SE);
+    *xConst = addRecExp->getStart();
+    *loop = addRecExp->getLoop();
+    DEBUG(dbgs() << "Broke " << *X << " into " << **xCoeff << " and "
+          << **xConst << "\n");
+    return isLoopInvariant(*xConst) && isLoopInvariant(*xCoeff);
+  } else if (isLoopInvariant(X)) {
+    *xConst = X;
+    *xCoeff = GetZeroSCEV(SE);
+    *loop = NULL;
+    return true;
+  } else {
+    DEBUG(dbgs() << *X << " cannot be broken up!");
+    return false;
+  }
 }
 
-bool LoopDependenceAnalysis::isSIVPair(const SCEV *A, const SCEV *B) const {
-  DenseSet<const Loop*> loops;
-  getLoops(A, &loops);
-  getLoops(B, &loops);
-  return loops.size() == 1;
+// Return true if the divisor divides the dividend without leaving a remainder.
+static bool IsRemainderZero(const SCEVConstant *dividend,
+                            const SCEVConstant *divisor) {
+  APInt constDividend = dividend->getValue()->getValue();
+  APInt constDivisor = divisor->getValue()->getValue();
+  APInt quotient, remainder;
+  APInt::sdivrem(constDividend, constDivisor, quotient, remainder);
+  return remainder == 0;
 }
 
-LoopDependenceAnalysis::DependenceResult
-LoopDependenceAnalysis::analyseZIV(const SCEV *A,
-                                   const SCEV *B,
-                                   Subscript *S) const {
-  assert(isZIVPair(A, B) && "Attempted to ZIV-test non-ZIV SCEVs!");
-  return A == B ? Dependent : Independent;
+static const SCEV *To64Bit(ScalarEvolution *SE, const SCEV *expr) {
+  assert(expr->getType()->isIntegerTy() &&
+         "To64Bit expects SCEV's with integer types.");
+  const Type *ty = expr->getType();
+
+  if (ty->getIntegerBitWidth() < 64) {
+    Type *i64 = Type::getIntNTy(SE->getContext(), 64);
+    return SE->getZeroExtendExpr(expr, i64);
+  } else if (ty->getIntegerBitWidth() == 64) {
+    return expr;
+  } else {
+    return NULL;
+  }
 }
 
-LoopDependenceAnalysis::DependenceResult
-LoopDependenceAnalysis::analyseSIV(const SCEV *A,
-                                   const SCEV *B,
-                                   Subscript *S) const {
-  return Unknown; // TODO: Implement.
+void LoopDependenceAnalysis::analyseStrongSIV(const SCEV *aCoeff,
+                                              const SCEV *aConst,
+                                              const SCEV *bCoeff,
+                                              const SCEV *bConst,
+                                              const Loop *loop,
+                                              Subscript *S) const {
+  DEBUG(dbgs() << "Strong SIV\n");
+  assert(aCoeff == bCoeff && "Strong SIV expects equal coeffs!");
+
+  // We have a strong SIV subscript here.
+  // [ m * a + n0 = m * b + n1 ] => [ (a - b) = (n1 - n0) / m ]
+  const SCEV *distance = SE->getMinusSCEV(bConst, aConst);
+  DEBUG(dbgs() << "Distance SCEV is " << *distance << "\n");
+  bool isGT = SE->isKnownNonPositive(distance)  ||
+    // It is sometimes easier to check for a non-negative value than for a
+    // negative value.
+    SE->isKnownNonNegative(SE->getNegativeSCEV(distance));
+
+  if (isGT)
+    distance = SE->getNegativeSCEV(distance);
+
+  if (SE->hasLoopInvariantBackedgeTakenCount(loop)) {
+    const SCEV* iterationCount = To64Bit(SE, SE->getBackedgeTakenCount(loop));
+    const SCEV *conditionExpr =
+      SE->getMinusSCEV(SE->getMulExpr(iterationCount, aCoeff), distance);
+    DEBUG(dbgs() << "Condition expression for strong SIV: "
+          << *conditionExpr << "\n");
+    if (SE->isKnownNonPositive(conditionExpr)) {
+      S->Kind = Subscript::Independent;
+      return;
+    }
+  }
+
+  // Use more exact information if available.
+  if (isa<SCEVConstant>(distance) && isa<SCEVConstant>(aCoeff)) {
+    if (!IsRemainderZero(cast<SCEVConstant>(distance),
+                         cast<SCEVConstant>(aCoeff))) {
+      // aCoeff does not divide distance and the difference between induction
+      // variables in two iterations is always integral.
+      S->Kind = Subscript::Independent;
+      return;
+    }
+  }
+
+  // Since aCoeff == bCoeff, weak-zero and weak-crossing are possible iff
+  // aCoeff == bCoeff == 0.  That case is already handled in the ZIV so we
+  // claim dependence, filling up direction and deltaValue along the way.
+
+  S->Kind = Subscript::Dependent;
+
+  if (distance->isZero())
+    S->Direction = Subscript::EQ;
+  else if (isGT)
+    S->Direction = Subscript::GT;
+  else
+    S->Direction = Subscript::LT;
+
+  S->Distance = distance;
+
+  DEBUG(dbgs() << "Dependent with " << S->Direction << ", " <<
+        *S->Distance << "\n");
+  return;
 }
 
-LoopDependenceAnalysis::DependenceResult
-LoopDependenceAnalysis::analyseMIV(const SCEV *A,
-                                   const SCEV *B,
-                                   Subscript *S) const {
-  return Unknown; // TODO: Implement.
+void LoopDependenceAnalysis::analyseWeakZeroSIV(const SCEV *aCoeff,
+                                                const SCEV *aConst,
+                                                const SCEV *bCoeff,
+                                                const SCEV *bConst,
+                                                const Loop *loop,
+                                                Subscript *S) const {
+  assert((aCoeff->isZero() || bCoeff->isZero()) &&
+         "For weak-zero one of the coefficients have to be zero!");
+
+  // Weak-zero test.
+  // [ n0 = m * b + n1 ] => [ b = (n0 - n1) / m ]
+  // [ m * a + n0 = n1 ] => [ a = (n1 - n0) / m ]
+  const SCEV *distance = aCoeff->isZero() ?
+    SE->getMinusSCEV(aConst, bConst) : SE->getMinusSCEV(bConst, aConst);
+
+  const SCEV *theCoeff = aCoeff->isZero() ? bCoeff : aCoeff;
+  if (SE->hasLoopInvariantBackedgeTakenCount(loop)) {
+    const SCEV *iterationCount = SE->getBackedgeTakenCount(loop);
+    const SCEV *conditionExpr =
+      SE->getMinusSCEV(SE->getMulExpr(theCoeff, iterationCount), distance);
+    if (SE->isKnownNonPositive(conditionExpr)) {
+      S->Kind = Subscript::Independent;
+      return;
+    }
+  }
+
+  if (isa<SCEVConstant>(distance) && isa<SCEVConstant>(theCoeff)) {
+    if (!IsRemainderZero(cast<SCEVConstant>(distance),
+                         cast<SCEVConstant>(theCoeff))) {
+      S->Kind = Subscript::Independent;
+      return;
+    }
+  }
+
+  // Since we know at least one of the coefficients is zero, this falling under
+  // weak-crossing-siv would mean that the pair is actually ZIV (which we know
+  // is not the case).  Thus we know the pairs are dependent.
+  S->Kind = Subscript::Dependent;
+  S->Direction = Subscript::ALL;
+  return;
 }
 
-LoopDependenceAnalysis::DependenceResult
+void LoopDependenceAnalysis::analyseWeakCrossingSIV(const SCEV *aCoeff,
+                                                    const SCEV *aConst,
+                                                    const SCEV *bCoeff,
+                                                    const SCEV *bConst,
+                                                    const Loop *loop,
+                                                    Subscript *S) const {
+  // Weak-crossing test.
+  // [ m * a + n0 = -m * b + n1 ] => [ a + b = (n1 - n0) / m ]
+
+  // All (a, b) pairs are of the form (t - x, t + x) where t is ((n1 - n0) / 2
+  // * m).  We check if t is of the form n / 2 where n is an integer, and if t
+  // lies within the loop bounds.  This is because:
+  //     t - x is integral, t + x is integral
+  // => (t - x) + (t + x) is integral
+  // =>  2 * t is integral.
+
+  const SCEV *distance = SE->getMinusSCEV(bConst, aConst);
+
+  // First check the loop bounds.
+  if (SE->hasLoopInvariantBackedgeTakenCount(loop)) {
+    // (n1 - n0) / 2m <= L => (n1 - n0 - 2mL) <= 0
+    const SCEV *iterationCount = SE->getBackedgeTakenCount(loop);
+    const SCEV *constantTwo = SE->getConstant(iterationCount->getType(), 2);
+    const SCEV *mL = SE->getMulExpr(aCoeff, iterationCount);
+    const SCEV *conditionExpr =
+      SE->getMinusSCEV(distance, SE->getMulExpr(constantTwo, mL));
+    DEBUG(dbgs() << "Condition expression for weak-crossing: "
+          << *conditionExpr << "\n");
+    if (SE->isKnownNonPositive(conditionExpr)) {
+      S->Kind = Subscript::Independent;
+      return;
+    }
+  }
+
+  // Checking if t is of the form (n / 2, n is an integer) is equivalent to
+  // checking (n1 - n0) / m is an integer.
+  if (isa<SCEVConstant>(distance) && isa<SCEVConstant>(aCoeff)) {
+    if (!IsRemainderZero(cast<SCEVConstant>(distance),
+                         cast<SCEVConstant>(aCoeff))) {
+      S->Kind = Subscript::Independent;
+      return;
+    }
+  }
+
+  S->Kind = Subscript::Dependent;
+  S->Direction = Subscript::ALL;
+  return;
+}
+
+LoopDependenceAnalysis::Dependence
+LoopDependenceAnalysis::analyseSubscriptVector(SmallVector<Subscript,4> &
+                                               S) const {
+  Dependence D;
+  D.Result = Dependence::Dependent;
+
+  for (SmallVector<Subscript, 4>::const_iterator I = S.begin(), E = S.end();
+       I != E; ++I) {
+    if (I->Kind == Subscript::Independent) {
+      D.Result = Dependence::Independent;
+      break;
+    } else if (I->Kind == Subscript::Dependent) {
+      if (I->Direction & Subscript::LT) {
+        D.Result = Dependence::Dependent;
+        break;
+      } if (I->Direction & Subscript::EQ)
+        continue;
+
+      assert(I->Direction == Subscript::GT && "Expected >!");
+      D.Result = Dependence::Independent;
+      break;
+    } else {
+      assert(I->Kind == Subscript::Unknown && "Unknown subscript kind!");
+      D.Result = Dependence::Unknown;
+      break;
+    }
+  }
+
+  D.Subscripts = S;
+  return D;
+}
+
+bool LoopDependenceAnalysis::analyseSIV(const SCEV *A, const SCEV *B,
+                                        Subscript *S) const {
+  DEBUG(dbgs() << "SIV analysing " << *A << ", " << *B << "\n");
+  const SCEV *aCoeff, *aConst, *bCoeff, *bConst;
+  const Loop *loopA, *loopB, *loop;
+
+  if (!getLinearExpression(A, &aCoeff, &aConst, &loopA) ||
+      !getLinearExpression(B, &bCoeff, &bConst, &loopB))
+    return false;
+
+  DEBUG(dbgs() << "Broke A into " << *aCoeff << ", " << *aConst << "\n");
+  DEBUG(dbgs() << "Broke B into " << *bCoeff << ", " << *bConst << "\n");
+
+  loop = loopA ? loopA : loopB;
+  assert(((loop == loopA) || (!loopA)) && ((loop == loopB) || (!loopB)) &&
+         "Inconsistency in detecting loop in SIV!");
+
+  if (aCoeff == bCoeff)
+    analyseStrongSIV(aCoeff, aConst, bCoeff, bConst, loop, S);
+  else if (aCoeff->isZero() || bCoeff->isZero())
+    analyseWeakZeroSIV(aCoeff, aConst, bCoeff, bConst, loop, S);
+  else if (aCoeff == SE->getNegativeSCEV(bCoeff))
+    analyseWeakCrossingSIV(aCoeff, aConst, bCoeff, bConst, loop, S);
+  else
+    return false;
+
+  return true;
+}
+
+bool LoopDependenceAnalysis::analyseMIV(const SCEV *A,
+                                        const SCEV *B,
+                                        Subscript *S) const {
+  return false;
+}
+
+LoopDependenceAnalysis::Subscript
 LoopDependenceAnalysis::analyseSubscript(const SCEV *A,
-                                         const SCEV *B,
-                                         Subscript *S) const {
-  DEBUG(dbgs() << "  Testing subscript: " << *A << ", " << *B << "\n");
+                                         const SCEV *B) const {
+  DEBUG(dbgs() << "Testing subscript: " << *A << ", " << *B << "\n");
+
+  Subscript S;
+  S.Distance = NULL;
+  S.Direction = Subscript::ALL;
+  S.Kind = Subscript::Unknown;
 
   if (A == B) {
-    DEBUG(dbgs() << "  -> [D] same SCEV\n");
-    return Dependent;
+    DEBUG(dbgs() << "Same SCEV\n");
+
+    S.Kind = Subscript::Dependent;
+    S.Direction = Subscript::EQ;
+    S.Distance = GetZeroSCEV(SE);
+    return S;
   }
 
-  if (!isAffine(A) || !isAffine(B)) {
-    DEBUG(dbgs() << "  -> [?] not affine\n");
-    return Unknown;
-  }
+  if (analyseZIV(A, B, &S))
+    return S;
 
-  if (isZIVPair(A, B))
-    return analyseZIV(A, B, S);
+  if (analyseSIV(A, B, &S))
+    return S;
 
-  if (isSIVPair(A, B))
-    return analyseSIV(A, B, S);
+  if (!analyseMIV(A, B, &S))
+    S.Kind = Subscript::Unknown;
 
-  return analyseMIV(A, B, S);
+  return S;
 }
 
-LoopDependenceAnalysis::DependenceResult
-LoopDependenceAnalysis::analysePair(DependencePair *P) const {
-  DEBUG(dbgs() << "Analysing:\n" << *P->A << "\n" << *P->B << "\n");
+LoopDependenceAnalysis::Dependence
+LoopDependenceAnalysis::analysePair(Value *A, Value *B) const {
+  DEBUG(dbgs() << "Analysing:\n" << *A << "\n" << *B << "\n");
+
+  Dependence D;
 
   // We only analyse loads and stores but no possible memory accesses by e.g.
   // free, call, or invoke instructions.
-  if (!IsLoadOrStoreInst(P->A) || !IsLoadOrStoreInst(P->B)) {
-    DEBUG(dbgs() << "--> [?] no load/store\n");
-    return Unknown;
+  if (!IsLoadOrStoreInst(A) || !IsLoadOrStoreInst(B)) {
+    DEBUG(dbgs() << "No load/store\n");
+    D.Result = Dependence::Unknown;
+    return D;
   }
 
-  Value *aPtr = GetPointerOperand(P->A);
-  Value *bPtr = GetPointerOperand(P->B);
+  Value *aPtr = GetPointerOperand(A);
+  Value *bPtr = GetPointerOperand(B);
 
   switch (UnderlyingObjectsAlias(AA, aPtr, bPtr)) {
   case AliasAnalysis::MayAlias:
   case AliasAnalysis::PartialAlias:
     // We can not analyse objects if we do not know about their aliasing.
-    DEBUG(dbgs() << "---> [?] may alias\n");
-    return Unknown;
+    DEBUG(dbgs() << "May alias\n");
+    D.Result = Dependence::Unknown;
+    return D;
 
   case AliasAnalysis::NoAlias:
     // If the objects noalias, they are distinct, accesses are independent.
-    DEBUG(dbgs() << "---> [I] no alias\n");
-    return Independent;
+    DEBUG(dbgs() << "No alias\n");
+    D.Result = Dependence::Independent;
+    return D;
 
   case AliasAnalysis::MustAlias:
     break; // The underlying objects alias, test accesses for dependence.
@@ -244,10 +504,13 @@ LoopDependenceAnalysis::analysePair(DependencePair *P) const {
   const GEPOperator *aGEP = dyn_cast<GEPOperator>(aPtr);
   const GEPOperator *bGEP = dyn_cast<GEPOperator>(bPtr);
 
-  if (!aGEP || !bGEP)
-    return Unknown;
+  if (!aGEP || !bGEP) {
+    D.Result = Dependence::Unknown;
+    return D;
+  }
 
-  // FIXME: Is filtering coupled subscripts necessary?
+  // Dividing subscripts into coupled and non-coupled groups might increace
+  // preciseness.  Not doing so is, however, conservative and safe.
 
   // Collect GEP operand pairs (FIXME: use GetGEPOperands from BasicAA), adding
   // trailing zeroes to the smaller GEP, if needed.
@@ -264,47 +527,51 @@ LoopDependenceAnalysis::analysePair(DependencePair *P) const {
     opds.push_back(std::make_pair(aSCEV, bSCEV));
   }
 
-  if (!opds.empty() && opds[0].first != opds[0].second) {
-    // We cannot (yet) handle arbitrary GEP pointer offsets. By limiting
-    //
-    // TODO: this could be relaxed by adding the size of the underlying object
-    // to the first subscript. If we have e.g. (GEP x,0,i; GEP x,2,-i) and we
-    // know that x is a [100 x i8]*, we could modify the first subscript to be
-    // (i, 200-i) instead of (i, -i).
-    return Unknown;
+  if (opds.empty()) {
+    D.Result = Dependence::Dependent;
+    return D;
   }
 
-  // Now analyse the collected operand pairs (skipping the GEP ptr offsets).
-  for (GEPOpdPairsTy::const_iterator i = opds.begin() + 1, end = opds.end();
-       i != end; ++i) {
-    Subscript subscript;
-    DependenceResult result = analyseSubscript(i->first, i->second, &subscript);
-    if (result != Dependent) {
-      // We either proved independence or failed to analyse this subscript.
-      // Further subscripts will not improve the situation, so abort early.
-      return result;
-    }
-    P->Subscripts.push_back(subscript);
+  // Even though we've established that the two pointers must alias, we can't
+  // say much about the subscripts unless the types match.  This limitation can
+  // be remedied by inspecting the structure of the types and multiplying the
+  // subscripts by the sizes.
+  if (aGEP->getPointerOperandType() != bGEP->getPointerOperandType()) {
+    D.Result = Dependence::Unknown;
+    return D;
   }
-  // We successfully analysed all subscripts but failed to prove independence.
-  return Dependent;
+
+  Dependence result;
+
+  // Now analyse the collected operand pairs (possibly skipping the GEP ptr
+  // offsets).
+  for (GEPOpdPairsTy::const_iterator I = opds.begin(), E = opds.end();
+       I != E; ++I) {
+    Subscript S = analyseSubscript(I->first, I->second);
+    result.Subscripts.push_back(S);
+  }
+
+  return analyseSubscriptVector(result.Subscripts);
 }
 
-bool LoopDependenceAnalysis::depends(Value *A, Value *B) {
+LoopDependenceAnalysis::Dependence
+LoopDependenceAnalysis::depends(Value *A, Value *B) {
   assert(isDependencePair(A, B) && "Values form no dependence pair!");
   ++NumAnswered;
 
   DependencePair *p;
   if (!findOrInsertDependencePair(A, B, p)) {
+    p->Result = analysePair(A, B);
     // The pair is not cached, so analyse it.
     ++NumAnalysed;
-    switch (p->Result = analysePair(p)) {
-    case Dependent:   ++NumDependent;   break;
-    case Independent: ++NumIndependent; break;
-    case Unknown:     ++NumUnknown;     break;
+    switch (p->Result.Result) {
+    case Dependence::Dependent:   ++NumDependent;   break;
+    case Dependence::Independent: ++NumIndependent; break;
+    case Dependence::Unknown:     ++NumUnknown;     break;
     }
   }
-  return p->Result != Independent;
+
+  return p->Result;
 }
 
 //===----------------------------------------------------------------------===//
@@ -315,6 +582,7 @@ bool LoopDependenceAnalysis::runOnLoop(Loop *L, LPPassManager &) {
   this->L = L;
   AA = &getAnalysis<AliasAnalysis>();
   SE = &getAnalysis<ScalarEvolution>();
+  TD = getAnalysisIfAvailable<TargetData>();
   return false;
 }
 
@@ -327,6 +595,38 @@ void LoopDependenceAnalysis::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.setPreservesAll();
   AU.addRequiredTransitive<AliasAnalysis>();
   AU.addRequiredTransitive<ScalarEvolution>();
+}
+
+static void PrintDependence(const LoopDependenceAnalysis::Dependence *dep,
+                            raw_ostream &OS) {
+  static const char * idxText = "IDU";
+  OS << idxText[dep->Result] << " { ";
+  for (SmallVector<LoopDependenceAnalysis::Subscript, 4>::const_iterator I =
+         dep->Subscripts.begin(),
+         E = dep->Subscripts.end(); I != E; ++I) {
+    OS << "[ ";
+    OS << idxText[I->Kind];
+
+    if (I->Kind == LoopDependenceAnalysis::Subscript::Independent) {
+      OS << " ]";
+      continue;
+    } else {
+      OS << ", ";
+    }
+
+    if (I->Direction & LoopDependenceAnalysis::Subscript::LT)
+      OS << "<";
+    if (I->Direction & LoopDependenceAnalysis::Subscript::EQ)
+      OS << "=";
+    if (I->Direction & LoopDependenceAnalysis::Subscript::GT)
+      OS << ">";
+    OS << ", ";
+
+    if (I->Distance)
+      OS << *I->Distance << " ";
+    OS << "] ";
+  }
+  OS << "}";
 }
 
 static void PrintLoopInfo(raw_ostream &OS,
@@ -347,13 +647,16 @@ static void PrintLoopInfo(raw_ostream &OS,
 
   OS << "  Pairwise dependence results:\n";
   for (SmallVector<Instruction*, 8>::const_iterator x = memrefs.begin(),
-       end = memrefs.end(); x != end; ++x)
-    for (SmallVector<Instruction*, 8>::const_iterator y = x + 1;
+         end = memrefs.end(); x != end; ++x)
+    for (SmallVector<Instruction*, 8>::const_iterator y = memrefs.begin();
          y != end; ++y)
-      if (LDA->isDependencePair(*x, *y))
+      if (LDA->isDependencePair(*x, *y)) {
         OS << "\t" << (x - memrefs.begin()) << "," << (y - memrefs.begin())
-           << ": " << (LDA->depends(*x, *y) ? "dependent" : "independent")
-           << "\n";
+           << ": ";
+        LoopDependenceAnalysis::Dependence result = LDA->depends(*x, *y);
+        PrintDependence(&result, OS);
+        OS << "\n";
+      }
 }
 
 void LoopDependenceAnalysis::print(raw_ostream &OS, const Module*) const {

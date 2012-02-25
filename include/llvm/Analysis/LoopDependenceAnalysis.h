@@ -32,34 +32,66 @@ class AliasAnalysis;
 class AnalysisUsage;
 class ScalarEvolution;
 class SCEV;
+class TargetData;
 class Value;
 class raw_ostream;
 
 class LoopDependenceAnalysis : public LoopPass {
   AliasAnalysis *AA;
   ScalarEvolution *SE;
+  TargetData *TD;
 
   /// L - The loop we are currently analysing.
   Loop *L;
+public:
 
-  /// TODO: doc
-  enum DependenceResult { Independent = 0, Dependent = 1, Unknown = 2 };
-
-  /// TODO: doc
+  /// Information about a specific subscript pair.
   struct Subscript {
-    /// TODO: Add distance, direction, breaking conditions, ...
+    enum {
+      Independent, // This subscript pair is provably independent.  None of the
+                   // other fields have hold any meaningful value.
+      Dependent,   // The subscript pairs have a dependency.  More information
+                   // present in the rest of the fields.
+      Unknown      // No information.  None of the other fields hold any
+                   // meaningful value.
+    } Kind;
+
+    // Direction information for a dependent subscript pair.  The most
+    // conservatve value is ALL.
+    enum {
+      LT  = 1, EQ  = 2, GT  = 4, ALL = 7
+    } Direction;
+
+    // Any of the following fields may be NULL, indicating absence of
+    // information.
+
+    // Distance between the two subscripts.  This can be calculated for strong
+    // SIV subscripts.
+    const SCEV *Distance;
   };
 
+  struct Dependence {
+    enum {
+      Independent,
+      Dependent,
+      Unknown
+    } Result;
+
+    SmallVector<Subscript, 4> Subscripts;
+
+    Dependence() : Result(Unknown) { }
+  };
+
+private:
   /// DependencePair - Represents a data dependence relation between to memory
   /// reference instructions.
   struct DependencePair : public FastFoldingSetNode {
     Value *A;
     Value *B;
-    DependenceResult Result;
-    SmallVector<Subscript, 4> Subscripts;
+    Dependence Result;
 
     DependencePair(const FoldingSetNodeID &ID, Value *a, Value *b) :
-        FastFoldingSetNode(ID), A(a), B(b), Result(Unknown), Subscripts() {}
+        FastFoldingSetNode(ID), A(a), B(b) {}
   };
 
   /// findOrInsertDependencePair - Return true if a DependencePair for the
@@ -69,25 +101,37 @@ class LoopDependenceAnalysis : public LoopPass {
 
   /// getLoops - Collect all loops of the loop nest L in which
   /// a given SCEV is variant.
-  void getLoops(const SCEV*, DenseSet<const Loop*>*) const;
+  void getLoops(const SCEV *, DenseSet<const Loop *> *) const;
 
   /// isLoopInvariant - True if a given SCEV is invariant in all loops of the
   /// loop nest starting at the innermost loop L.
-  bool isLoopInvariant(const SCEV*) const;
+  bool isLoopInvariant(const SCEV *) const;
 
-  /// isAffine - An SCEV is affine with respect to the loop nest starting at
-  /// the innermost loop L if it is of the form A+B*X where A, B are invariant
-  /// in the loop nest and X is a induction variable in the loop nest.
-  bool isAffine(const SCEV*) const;
+  /// Tries to break an add recurrence into a pair of SCEVs A and B such that
+  /// the value of the add recurrence is (A * I + B) where I is the loop
+  /// induction variable and A and B are loop invariant expressions.  This also
+  /// computes the loop the add recurrence belongs to.  Returns true on success
+  /// and false if it is unable to break up the SCEV.
+  bool getLinearExpression(const SCEV *X, const SCEV **, const SCEV **,
+                           const Loop **) const;
 
-  /// TODO: doc
-  bool isZIVPair(const SCEV*, const SCEV*) const;
-  bool isSIVPair(const SCEV*, const SCEV*) const;
-  DependenceResult analyseZIV(const SCEV*, const SCEV*, Subscript*) const;
-  DependenceResult analyseSIV(const SCEV*, const SCEV*, Subscript*) const;
-  DependenceResult analyseMIV(const SCEV*, const SCEV*, Subscript*) const;
-  DependenceResult analyseSubscript(const SCEV*, const SCEV*, Subscript*) const;
-  DependenceResult analysePair(DependencePair*) const;
+  /// These functions return true if they could analyse the subscript pair in a
+  /// meaningful way.
+  bool analyseZIV(const SCEV *, const SCEV *, Subscript *) const;
+  bool analyseSIV(const SCEV *, const SCEV *, Subscript *) const;
+  bool analyseMIV(const SCEV *, const SCEV *, Subscript *) const;
+
+  void analyseStrongSIV(const SCEV *, const SCEV *, const SCEV *, const SCEV *,
+                        const Loop *, Subscript *) const;
+  void analyseWeakZeroSIV(const SCEV *, const SCEV *, const SCEV *,
+                          const SCEV *, const Loop *, Subscript *) const;
+  void analyseWeakCrossingSIV(const SCEV *, const SCEV *, const SCEV *,
+                              const SCEV *, const Loop *, Subscript *) const;
+
+  Subscript analyseSubscript(const SCEV *, const SCEV *) const;
+  Dependence analyseSubscriptVector(SmallVector<Subscript, 4> &) const;
+
+  Dependence analysePair(Value *, Value *) const;
 
 public:
   static char ID; // Class identification, replacement for typeinfo
@@ -98,16 +142,16 @@ public:
   /// isDependencePair - Check whether two values can possibly give rise to
   /// a data dependence: that is the case if both are instructions accessing
   /// memory and at least one of those accesses is a write.
-  bool isDependencePair(const Value*, const Value*) const;
+  bool isDependencePair(const Value *, const Value *) const;
 
   /// depends - Return a boolean indicating if there is a data dependence
   /// between two instructions.
-  bool depends(Value*, Value*);
+  Dependence depends(Value *, Value *);
 
-  bool runOnLoop(Loop*, LPPassManager&);
+  bool runOnLoop(Loop *, LPPassManager &);
   virtual void releaseMemory();
-  virtual void getAnalysisUsage(AnalysisUsage&) const;
-  void print(raw_ostream&, const Module* = 0) const;
+  virtual void getAnalysisUsage(AnalysisUsage &) const;
+  void print(raw_ostream &, const Module * = 0) const;
 
 private:
   FoldingSet<DependencePair> Pairs;

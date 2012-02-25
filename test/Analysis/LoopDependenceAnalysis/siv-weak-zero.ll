@@ -45,7 +45,7 @@ for.body:
   %y = load i32* %y.addr      ; 1
   %r = add i32 %y, %x
   store i32 %r, i32* %x.addr  ; 2
-; CHECK: 0,2: dep
+; CHECK: 0,2: ind
 ; CHECK: 1,2: ind
   %i.next = add i64 %i, 1
   %exitcond = icmp eq i64 %i.next, 250
