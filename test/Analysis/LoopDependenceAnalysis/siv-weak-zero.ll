@@ -19,8 +19,8 @@ for.body:
   %y = load i32* %y.addr      ; 1
   %r = add i32 %y, %x
   store i32 %r, i32* %x.addr  ; 2
-; CHECK: 0,2: dep
-; CHECK: 1,2: ind
+; CHECK: 0,2: D { [ D, =, 0 ] [ D, <=>, ] }
+; CHECK: 1,2: I { }
   %i.next = add i64 %i, 1
   %exitcond = icmp eq i64 %i.next, 256
   br i1 %exitcond, label %for.end, label %for.body
@@ -45,8 +45,8 @@ for.body:
   %y = load i32* %y.addr      ; 1
   %r = add i32 %y, %x
   store i32 %r, i32* %x.addr  ; 2
-; CHECK: 0,2: ind
-; CHECK: 1,2: ind
+; CHECK: 0,2: I { [ D, =, 0 ] [ I ]}
+; CHECK: 1,2: I { }
   %i.next = add i64 %i, 1
   %exitcond = icmp eq i64 %i.next, 250
   br i1 %exitcond, label %for.end, label %for.body
