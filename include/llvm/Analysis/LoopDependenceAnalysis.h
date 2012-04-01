@@ -45,41 +45,39 @@ class LoopDependenceAnalysis : public LoopPass {
   Loop *L;
 public:
 
-  /// Information about a specific subscript pair.
-  struct Subscript {
-    enum {
-      Independent, // This subscript pair is provably independent.  None of the
-                   // other fields have hold any meaningful value.
-      Dependent,   // The subscript pairs have a dependency.  More information
-                   // present in the rest of the fields.
-      Unknown      // No information.  None of the other fields hold any
-                   // meaningful value.
-    } Kind;
+  class Dependence {
+  public:
+    struct Level {
+      enum { LT  = 1, EQ  = 2, GT  = 4, ALL = 7 } direction;
+      bool scalar;
+      const SCEV *distance; // NULL implies no distance available
+      const Loop *loop;
+    };
 
-    // Direction information for a dependent subscript pair.  The most
-    // conservatve value is ALL.
-    enum {
-      LT  = 1, EQ  = 2, GT  = 4, ALL = 7
-    } Direction;
+    enum Kind { Flow, Anti, Output, Input };
 
-    // Any of the following fields may be NULL, indicating absence of
-    // information.
+    Kind getKind() const {
+      return kind;
+    }
 
-    // Distance between the two subscripts.  This can be calculated for strong
-    // SIV subscripts.
-    const SCEV *Distance;
-  };
+    const Value *getSource() const {
+      return source;
+    }
 
-  struct Dependence {
-    enum {
-      Independent,
-      Dependent,
-      Unknown
-    } Result;
+    const Value *getDestination() const {
+      return destination;
+    }
 
-    SmallVector<Subscript, 4> Subscripts;
+    typedef SmallVector<const Level *, 4>::const_iterator const_iterator;
+    const_iterator begin() const { return levels.begin(); }
+    const_iterator end() const { return levels.end(); }
 
-    Dependence() : Result(Unknown) { }
+  private:
+    Value *source, *destination;
+    Kind kind;
+    SmallVector<const Level *, 4> levels;
+
+    friend class LoopDependenceAnalysis;
   };
 
 private:
