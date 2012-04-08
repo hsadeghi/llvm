@@ -23,6 +23,7 @@ set(sources
   X86FrameLowering.cpp
   X86ISelDAGToDAG.cpp
   X86ISelLowering.cpp
+  X86InstructionCounter.cpp
   X86InstrInfo.cpp
   X86JITInfo.cpp
   X86MCInstLower.cpp

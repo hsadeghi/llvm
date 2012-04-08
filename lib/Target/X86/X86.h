@@ -64,6 +64,8 @@ FunctionPass *createEmitX86CodeToMemory();
 ///
 FunctionPass *createX86MaxStackAlignmentHeuristicPass();
 
+FunctionPass *createX86InstructionCounterPass(std::string);
+
 } // End llvm namespace
 
 #endif

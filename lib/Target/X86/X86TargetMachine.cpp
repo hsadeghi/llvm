@@ -113,6 +113,9 @@ UseVZeroUpper("x86-use-vzeroupper",
   cl::desc("Minimize AVX to SSE transition penalty"),
   cl::init(true));
 
+static cl::opt<std::string>
+InstrCounterFileName("instr-count", cl::desc("foo"), cl::init(""));
+
 //===----------------------------------------------------------------------===//
 // Pass Pipeline Configuration
 //===----------------------------------------------------------------------===//
@@ -175,6 +178,9 @@ bool X86PassConfig::addPreEmitPass() {
     PM.add(createX86IssueVZeroUpperPass());
     ShouldPrint = true;
   }
+
+  if (!InstrCounterFileName.empty())
+    PM.add(createX86InstructionCounterPass(InstrCounterFileName));
 
   return ShouldPrint;
 }
