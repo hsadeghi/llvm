@@ -23,10 +23,14 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/FoldingSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/LoopPass.h"
 #include "llvm/Support/Allocator.h"
 
 namespace llvm {
+
+// TODO: Rename class
+// TODO: rename a and b to src and dest
 
 class AliasAnalysis;
 class AnalysisUsage;
@@ -39,25 +43,29 @@ class raw_ostream;
 class LoopDependenceAnalysis : public LoopPass {
   AliasAnalysis *AA;
   ScalarEvolution *SE;
-  TargetData *TD;
+  LoopInfo *LI;
 
   /// L - The loop we are currently analysing.
   Loop *L;
 public:
 
+  struct Level {
+    enum { NONE = 0, LT  = 1, EQ  = 2, GT  = 4, ALL = 7 };
+    int direction;
+    bool scalar;
+    const SCEV *distance; // NULL implies no distance available
+
+    Level() : direction(ALL), scalar(true), distance(NULL) { }
+
+    void intersect(const Level &level);
+  };
+
   class Dependence {
   public:
-    struct Level {
-      enum { LT  = 1, EQ  = 2, GT  = 4, ALL = 7 } direction;
-      bool scalar;
-      const SCEV *distance; // NULL implies no distance available
-      const Loop *loop;
-    };
+    enum Result { Independent, Dependent };
 
-    enum Kind { Flow, Anti, Output, Input };
-
-    Kind getKind() const {
-      return kind;
+    Result getResult() const {
+      return result;
     }
 
     const Value *getSource() const {
@@ -68,14 +76,18 @@ public:
       return destination;
     }
 
-    typedef SmallVector<const Level *, 4>::const_iterator const_iterator;
+    typedef SmallVector<const Level, 4>::const_iterator const_iterator;
     const_iterator begin() const { return levels.begin(); }
     const_iterator end() const { return levels.end(); }
 
+    explicit Dependence(int numLevels) : levels(numLevels),
+                                         result(Dependent)
+      { }
+
   private:
     Value *source, *destination;
-    Kind kind;
-    SmallVector<const Level *, 4> levels;
+    SmallVector<Level, 4> levels;
+    Result result;
 
     friend class LoopDependenceAnalysis;
   };
@@ -84,18 +96,18 @@ private:
   /// DependencePair - Represents a data dependence relation between to memory
   /// reference instructions.
   struct DependencePair : public FastFoldingSetNode {
-    Value *A;
-    Value *B;
-    Dependence Result;
+    Value *destination;
+    Value *source;
+    Dependence *result;
 
-    DependencePair(const FoldingSetNodeID &ID, Value *a, Value *b) :
-        FastFoldingSetNode(ID), A(a), B(b) {}
+    DependencePair(const FoldingSetNodeID &ID, Value *dest, Value *src) :
+      FastFoldingSetNode(ID), destination(dest), source(src) {}
   };
 
   /// findOrInsertDependencePair - Return true if a DependencePair for the
   /// given Values already exists, false if a new DependencePair had to be
   /// created. The third argument is set to the pair found or created.
-  bool findOrInsertDependencePair(Value*, Value*, DependencePair*&);
+  bool findOrInsertDependencePair(Value *, Value *, DependencePair *&);
 
   /// getLoops - Collect all loops of the loop nest L in which
   /// a given SCEV is variant.
@@ -115,21 +127,21 @@ private:
 
   /// These functions return true if they could analyse the subscript pair in a
   /// meaningful way.
-  bool analyseZIV(const SCEV *, const SCEV *, Subscript *) const;
-  bool analyseSIV(const SCEV *, const SCEV *, Subscript *) const;
-  bool analyseMIV(const SCEV *, const SCEV *, Subscript *) const;
+  bool analyseZIV(const SCEV *, const SCEV *, Level *, bool *) const;
+  bool analyseSIV(const SCEV *, const SCEV *, Level *, bool *) const;
 
-  void analyseStrongSIV(const SCEV *, const SCEV *, const SCEV *, const SCEV *,
-                        const Loop *, Subscript *) const;
-  void analyseWeakZeroSIV(const SCEV *, const SCEV *, const SCEV *,
-                          const SCEV *, const Loop *, Subscript *) const;
-  void analyseWeakCrossingSIV(const SCEV *, const SCEV *, const SCEV *,
-                              const SCEV *, const Loop *, Subscript *) const;
+  bool analyseStrongSIV(const SCEV *, const SCEV *, const SCEV *, const SCEV *,
+                        const Loop *, Level *) const;
+  bool analyseWeakZeroSIV(const SCEV *, const SCEV *, const SCEV *,
+                          const SCEV *, const Loop *, Level *) const;
+  bool analyseWeakCrossingSIV(const SCEV *, const SCEV *, const SCEV *,
+                              const SCEV *, const Loop *, Level *) const;
 
-  Subscript analyseSubscript(const SCEV *, const SCEV *) const;
-  Dependence analyseSubscriptVector(SmallVector<Subscript, 4> &) const;
+  /// true on dependence, false in proven independence
+  bool analyseSubscript(const SCEV *, const SCEV *, Level *,
+                        const Loop **) const;
 
-  Dependence analysePair(Value *, Value *) const;
+  Dependence *analysePair(Value *, Value *) const;
 
 public:
   static char ID; // Class identification, replacement for typeinfo
@@ -137,19 +149,15 @@ public:
     initializeLoopDependenceAnalysisPass(*PassRegistry::getPassRegistry());
   }
 
-  /// isDependencePair - Check whether two values can possibly give rise to
-  /// a data dependence: that is the case if both are instructions accessing
-  /// memory and at least one of those accesses is a write.
-  bool isDependencePair(const Value *, const Value *) const;
-
   /// depends - Return a boolean indicating if there is a data dependence
   /// between two instructions.
-  Dependence depends(Value *, Value *);
+  Dependence *depends(Value *destination, Value *source);
 
   bool runOnLoop(Loop *, LPPassManager &);
   virtual void releaseMemory();
   virtual void getAnalysisUsage(AnalysisUsage &) const;
   void print(raw_ostream &, const Module * = 0) const;
+  bool isDependencePair(const Value *A, const Value *B) const;
 
 private:
   FoldingSet<DependencePair> Pairs;
