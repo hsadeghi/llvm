@@ -35,6 +35,7 @@ add_llvm_library(LLVMAnalysis
   ModuleDebugInfoPrinter.cpp
   NoAliasAnalysis.cpp
   PHITransAddr.cpp
+  ParallelizationMetadata.cpp
   PathNumbering.cpp
   PathProfileInfo.cpp
   PathProfileVerifier.cpp

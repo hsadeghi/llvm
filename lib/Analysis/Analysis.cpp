@@ -51,6 +51,7 @@ void llvm::initializeAnalysis(PassRegistry &Registry) {
   initializeMemDepPrinterPass(Registry);
   initializeMemoryDependenceAnalysisPass(Registry);
   initializeModuleDebugInfoPrinterPass(Registry);
+  initializeParallelizationMetadataPass(Registry);
   initializePostDominatorTreePass(Registry);
   initializeProfileEstimatorPassPass(Registry);
   initializeNoProfileInfoPass(Registry);
