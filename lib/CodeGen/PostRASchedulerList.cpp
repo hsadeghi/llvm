@@ -37,6 +37,7 @@
 #include "llvm/CodeGen/ScheduleDAGInstrs.h"
 #include "llvm/CodeGen/ScheduleHazardRecognizer.h"
 #include "llvm/CodeGen/SchedulerRegistry.h"
+#include "llvm/CodeGen/SwitchingPriorityQueue.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -75,6 +76,11 @@ DebugMod("postra-sched-debugmod",
                       cl::desc("Debug control MBBs that are scheduled"),
                       cl::init(0), cl::Hidden);
 
+static cl::opt<bool>
+OptimizeForPower("optimize-for-energy",
+                 cl::desc("schedule instructions to reduce switching costs"),
+                 cl::init(false));
+
 AntiDepBreaker::~AntiDepBreaker() { }
 
 namespace {
@@ -98,13 +104,18 @@ namespace {
     }
 
     bool runOnMachineFunction(MachineFunction &Fn);
+
+  private:
+    template<typename PriorityQueue>
+    bool runScheduler(MachineFunction &Fn);
   };
   char PostRAScheduler::ID = 0;
 
+  template<typename PriorityQueue>
   class SchedulePostRATDList : public ScheduleDAGInstrs {
     /// AvailableQueue - The priority queue to use for the available SUnits.
     ///
-    LatencyPriorityQueue AvailableQueue;
+    PriorityQueue AvailableQueue;
 
     /// PendingQueue - This contains all of the instructions whose operands have
     /// been issued, but their results are not ready yet (due to the latency of
@@ -191,7 +202,8 @@ char &llvm::PostRASchedulerID = PostRAScheduler::ID;
 INITIALIZE_PASS(PostRAScheduler, "post-RA-sched",
                 "Post RA top-down list latency scheduler", false, false)
 
-SchedulePostRATDList::SchedulePostRATDList(
+template<typename PQ>
+SchedulePostRATDList<PQ>::SchedulePostRATDList(
   MachineFunction &MF, MachineLoopInfo &MLI, MachineDominatorTree &MDT,
   AliasAnalysis *AA, const RegisterClassInfo &RCI,
   TargetSubtargetInfo::AntiDepBreakMode AntiDepMode,
@@ -214,13 +226,15 @@ SchedulePostRATDList::SchedulePostRATDList(
       (AntiDepBreaker *)new CriticalAntiDepBreaker(MF, RCI) : NULL));
 }
 
-SchedulePostRATDList::~SchedulePostRATDList() {
+template<typename PQ>
+SchedulePostRATDList<PQ>::~SchedulePostRATDList() {
   delete HazardRec;
   delete AntiDepBreak;
 }
 
 /// Initialize state associated with the next scheduling region.
-void SchedulePostRATDList::enterRegion(MachineBasicBlock *bb,
+template<typename PQ>
+void SchedulePostRATDList<PQ>::enterRegion(MachineBasicBlock *bb,
                  MachineBasicBlock::iterator begin,
                  MachineBasicBlock::iterator end,
                  unsigned endcount) {
@@ -229,7 +243,8 @@ void SchedulePostRATDList::enterRegion(MachineBasicBlock *bb,
 }
 
 /// Print the schedule before exiting the region.
-void SchedulePostRATDList::exitRegion() {
+template<typename PQ>
+void SchedulePostRATDList<PQ>::exitRegion() {
   DEBUG({
       dbgs() << "*** Final schedule ***\n";
       dumpSchedule();
@@ -240,7 +255,8 @@ void SchedulePostRATDList::exitRegion() {
 
 #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
 /// dumpSchedule - dump the scheduled Sequence.
-void SchedulePostRATDList::dumpSchedule() const {
+template<typename PQ>
+void SchedulePostRATDList<PQ>::dumpSchedule() const {
   for (unsigned i = 0, e = Sequence.size(); i != e; i++) {
     if (SUnit *SU = Sequence[i])
       SU->dump(this);
@@ -251,6 +267,15 @@ void SchedulePostRATDList::dumpSchedule() const {
 #endif
 
 bool PostRAScheduler::runOnMachineFunction(MachineFunction &Fn) {
+  if (OptimizeForPower) {
+    return runScheduler<SwitchingPriorityQueue>(Fn);
+  } else {
+    return runScheduler<LatencyPriorityQueue>(Fn);
+  }
+}
+
+template<typename PriorityQueue>
+bool PostRAScheduler::runScheduler(MachineFunction &Fn) {
   TII = Fn.getTarget().getInstrInfo();
   MachineLoopInfo &MLI = getAnalysis<MachineLoopInfo>();
   MachineDominatorTree &MDT = getAnalysis<MachineDominatorTree>();
@@ -286,8 +311,8 @@ bool PostRAScheduler::runOnMachineFunction(MachineFunction &Fn) {
 
   DEBUG(dbgs() << "PostRAScheduler\n");
 
-  SchedulePostRATDList Scheduler(Fn, MLI, MDT, AA, RegClassInfo, AntiDepMode,
-                                 CriticalPathRCs);
+  SchedulePostRATDList<PriorityQueue> Scheduler
+    (Fn, MLI, MDT, AA, RegClassInfo, AntiDepMode, CriticalPathRCs);
 
   // Loop over all of the basic blocks
   for (MachineFunction::iterator MBB = Fn.begin(), MBBe = Fn.end();
@@ -350,7 +375,8 @@ bool PostRAScheduler::runOnMachineFunction(MachineFunction &Fn) {
 /// StartBlock - Initialize register live-range state for scheduling in
 /// this block.
 ///
-void SchedulePostRATDList::startBlock(MachineBasicBlock *BB) {
+template<typename PQ>
+void SchedulePostRATDList<PQ>::startBlock(MachineBasicBlock *BB) {
   // Call the superclass.
   ScheduleDAGInstrs::startBlock(BB);
 
@@ -362,7 +388,8 @@ void SchedulePostRATDList::startBlock(MachineBasicBlock *BB) {
 
 /// Schedule - Schedule the instruction range using list scheduling.
 ///
-void SchedulePostRATDList::schedule() {
+template<typename PQ>
+void SchedulePostRATDList<PQ>::schedule() {
   // Build the scheduling graph.
   buildSchedGraph(AA);
 
@@ -397,14 +424,16 @@ void SchedulePostRATDList::schedule() {
 /// Observe - Update liveness information to account for the current
 /// instruction, which will not be scheduled.
 ///
-void SchedulePostRATDList::Observe(MachineInstr *MI, unsigned Count) {
+template<typename PQ>
+void SchedulePostRATDList<PQ>::Observe(MachineInstr *MI, unsigned Count) {
   if (AntiDepBreak != NULL)
     AntiDepBreak->Observe(MI, Count, EndIndex);
 }
 
 /// FinishBlock - Clean up register live-range state.
 ///
-void SchedulePostRATDList::finishBlock() {
+template<typename PQ>
+void SchedulePostRATDList<PQ>::finishBlock() {
   if (AntiDepBreak != NULL)
     AntiDepBreak->FinishBlock();
 
@@ -414,7 +443,8 @@ void SchedulePostRATDList::finishBlock() {
 
 /// StartBlockForKills - Initialize register live-range state for updating kills
 ///
-void SchedulePostRATDList::StartBlockForKills(MachineBasicBlock *BB) {
+template<typename PQ>
+void SchedulePostRATDList<PQ>::StartBlockForKills(MachineBasicBlock *BB) {
   // Start with no live registers.
   LiveRegs.reset();
 
@@ -446,8 +476,9 @@ void SchedulePostRATDList::StartBlockForKills(MachineBasicBlock *BB) {
   }
 }
 
-bool SchedulePostRATDList::ToggleKillFlag(MachineInstr *MI,
-                                          MachineOperand &MO) {
+template<typename PQ>
+bool SchedulePostRATDList<PQ>::ToggleKillFlag(MachineInstr *MI,
+                                              MachineOperand &MO) {
   // Setting kill flag...
   if (!MO.isKill()) {
     MO.setIsKill(true);
@@ -481,7 +512,8 @@ bool SchedulePostRATDList::ToggleKillFlag(MachineInstr *MI,
 /// FixupKills - Fix the register kill flags, they may have been made
 /// incorrect by instruction reordering.
 ///
-void SchedulePostRATDList::FixupKills(MachineBasicBlock *MBB) {
+template<typename PQ>
+void SchedulePostRATDList<PQ>::FixupKills(MachineBasicBlock *MBB) {
   DEBUG(dbgs() << "Fixup kills for BB#" << MBB->getNumber() << '\n');
 
   BitVector killedRegs(TRI->getNumRegs());
@@ -576,7 +608,8 @@ void SchedulePostRATDList::FixupKills(MachineBasicBlock *MBB) {
 
 /// ReleaseSucc - Decrement the NumPredsLeft count of a successor. Add it to
 /// the PendingQueue if the count reaches zero.
-void SchedulePostRATDList::ReleaseSucc(SUnit *SU, SDep *SuccEdge) {
+template<typename PQ>
+void SchedulePostRATDList<PQ>::ReleaseSucc(SUnit *SU, SDep *SuccEdge) {
   SUnit *SuccSU = SuccEdge->getSUnit();
 
   if (SuccEdge->isWeak()) {
@@ -611,7 +644,8 @@ void SchedulePostRATDList::ReleaseSucc(SUnit *SU, SDep *SuccEdge) {
 }
 
 /// ReleaseSuccessors - Call ReleaseSucc on each of SU's successors.
-void SchedulePostRATDList::ReleaseSuccessors(SUnit *SU) {
+template<typename PQ>
+void SchedulePostRATDList<PQ>::ReleaseSuccessors(SUnit *SU) {
   for (SUnit::succ_iterator I = SU->Succs.begin(), E = SU->Succs.end();
        I != E; ++I) {
     ReleaseSucc(SU, &*I);
@@ -621,7 +655,9 @@ void SchedulePostRATDList::ReleaseSuccessors(SUnit *SU) {
 /// ScheduleNodeTopDown - Add the node to the schedule. Decrement the pending
 /// count of its successors. If a successor pending count is zero, add it to
 /// the Available queue.
-void SchedulePostRATDList::ScheduleNodeTopDown(SUnit *SU, unsigned CurCycle) {
+template<typename PQ>
+void SchedulePostRATDList<PQ>::ScheduleNodeTopDown(
+  SUnit *SU, unsigned CurCycle) {
   DEBUG(dbgs() << "*** Scheduling [" << CurCycle << "]: ");
   DEBUG(SU->dump(this));
 
@@ -637,7 +673,8 @@ void SchedulePostRATDList::ScheduleNodeTopDown(SUnit *SU, unsigned CurCycle) {
 
 /// ListScheduleTopDown - The main loop of list scheduling for top-down
 /// schedulers.
-void SchedulePostRATDList::ListScheduleTopDown() {
+template<typename PQ>
+void SchedulePostRATDList<PQ>::ListScheduleTopDown() {
   unsigned CurCycle = 0;
 
   // We're scheduling top-down but we're visiting the regions in
@@ -756,7 +793,8 @@ void SchedulePostRATDList::ListScheduleTopDown() {
 }
 
 // EmitSchedule - Emit the machine code in scheduled order.
-void SchedulePostRATDList::EmitSchedule() {
+template<typename PQ>
+void SchedulePostRATDList<PQ>::EmitSchedule() {
   RegionBegin = RegionEnd;
 
   // If first instruction was a DBG_VALUE then put it back.
