@@ -111,7 +111,7 @@ namespace {
 
   private:
     template<typename PriorityQueue>
-    bool runScheduler(MachineFunction &Fn);
+    bool runScheduler(MachineFunction &Fn, PriorityQueue pq);
   };
   char PostRAScheduler::ID = 0;
 
@@ -147,7 +147,8 @@ namespace {
       MachineFunction &MF, MachineLoopInfo &MLI, MachineDominatorTree &MDT,
       AliasAnalysis *AA, const RegisterClassInfo&,
       TargetSubtargetInfo::AntiDepBreakMode AntiDepMode,
-      SmallVectorImpl<const TargetRegisterClass*> &CriticalPathRCs);
+      SmallVectorImpl<const TargetRegisterClass*> &CriticalPathRCs,
+      PriorityQueue queue);
 
     ~SchedulePostRATDList();
 
@@ -211,9 +212,10 @@ SchedulePostRATDList<PQ>::SchedulePostRATDList(
   MachineFunction &MF, MachineLoopInfo &MLI, MachineDominatorTree &MDT,
   AliasAnalysis *AA, const RegisterClassInfo &RCI,
   TargetSubtargetInfo::AntiDepBreakMode AntiDepMode,
-  SmallVectorImpl<const TargetRegisterClass*> &CriticalPathRCs)
-  : ScheduleDAGInstrs(MF, MLI, MDT, /*IsPostRA=*/true), AA(AA),
-    LiveRegs(TRI->getNumRegs())
+  SmallVectorImpl<const TargetRegisterClass*> &CriticalPathRCs,
+  PQ pq)
+  : ScheduleDAGInstrs(MF, MLI, MDT, /*IsPostRA=*/true),
+  AvailableQueue(pq), AA(AA), LiveRegs(TRI->getNumRegs())
 {
   const TargetMachine &TM = MF.getTarget();
   const InstrItineraryData *InstrItins = TM.getInstrItineraryData();
@@ -274,13 +276,14 @@ bool PostRAScheduler::runOnMachineFunction(MachineFunction &Fn) {
   if (OptimizeForPower) {
     encodingEstimator =
       &getAnalysisID<EncodingEstimator>(EncodingEstimator::getPassID());
-    return runScheduler<SwitchingPriorityQueue>(Fn);
+    return runScheduler<SwitchingPriorityQueue>(
+      Fn, SwitchingPriorityQueue(encodingEstimator));
   }
-  return runScheduler<LatencyPriorityQueue>(Fn);
+  return runScheduler<LatencyPriorityQueue>(Fn, LatencyPriorityQueue());
 }
 
 template<typename PriorityQueue>
-bool PostRAScheduler::runScheduler(MachineFunction &Fn) {
+bool PostRAScheduler::runScheduler(MachineFunction &Fn, PriorityQueue pq) {
   TII = Fn.getTarget().getInstrInfo();
   MachineLoopInfo &MLI = getAnalysis<MachineLoopInfo>();
   MachineDominatorTree &MDT = getAnalysis<MachineDominatorTree>();
@@ -317,7 +320,7 @@ bool PostRAScheduler::runScheduler(MachineFunction &Fn) {
   DEBUG(dbgs() << "PostRAScheduler\n");
 
   SchedulePostRATDList<PriorityQueue> Scheduler
-    (Fn, MLI, MDT, AA, RegClassInfo, AntiDepMode, CriticalPathRCs);
+    (Fn, MLI, MDT, AA, RegClassInfo, AntiDepMode, CriticalPathRCs, pq);
 
   // Loop over all of the basic blocks
   for (MachineFunction::iterator MBB = Fn.begin(), MBBe = Fn.end();

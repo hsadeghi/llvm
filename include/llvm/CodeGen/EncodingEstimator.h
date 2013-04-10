@@ -17,6 +17,7 @@
 
 #include <stdint.h>
 
+#include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 
 namespace llvm {

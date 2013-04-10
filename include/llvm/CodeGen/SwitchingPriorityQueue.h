@@ -15,6 +15,7 @@
 #ifndef LLVM_CODEGEN_SWITCHINGPRIORITYQUEUE_H
 #define LLVM_CODEGEN_SWITCHINGPRIORITYQUEUE_H
 
+#include "llvm/CodeGen/EncodingEstimator.h"
 #include "llvm/CodeGen/ScheduleDAG.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -22,6 +23,9 @@ namespace llvm {
 
 class SwitchingPriorityQueue : public SchedulingPriorityQueue {
  public:
+  explicit SwitchingPriorityQueue(EncodingEstimator *estimator)
+    : encodingEstimator(estimator) { }
+
   virtual bool isBottomUp() const { return false; }
   virtual void initNodes(std::vector<SUnit> &) { }
   virtual void addNode(const SUnit *) { }
@@ -40,6 +44,7 @@ class SwitchingPriorityQueue : public SchedulingPriorityQueue {
 private:
   std::vector<SUnit *> queue;
   std::vector<SUnit *> unitsAlreadyScheduled;
+  EncodingEstimator *encodingEstimator;
 
   void removeFrom(std::vector<SUnit *> &, const SUnit *);
 };
