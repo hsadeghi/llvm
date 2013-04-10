@@ -1491,12 +1491,24 @@ void Emitter<CodeEmitter>::emitInstruction(MachineInstr &MI,
 }
 
 class DummyEmitter : public JITCodeEmitter {
-public:
+ public:
   virtual void startFunction(MachineFunction &F) { }
-  virtual bool finishFunction(MachineFunction &F) { return false; }
+  virtual bool finishFunction(MachineFunction &F) {
+    if (CurBufferPtr != BufferEnd) return false;
+    currentSize *= 2;
+    resize();
+    buffers.clear();
+    return true;
+  }
 
-  virtual void startInstruction(MachineInstr &MI) { }
-  virtual void finishInstruction(MachineInstr &MI) { }
+  virtual void startInstruction(MachineInstr &MI) {
+    assert(buffers.find(&MI) == buffers.end());
+    buffers[&MI].Begin = CurBufferPtr;
+  }
+  virtual void finishInstruction(MachineInstr &MI) {
+    assert(buffers.find(&MI) != buffers.end());
+    buffers[&MI].Size = CurBufferPtr - buffers[&MI].Begin;
+  }
 
   virtual void addRelocation(const MachineRelocation &MR) { }
 
@@ -1525,6 +1537,29 @@ public:
     return NULL;
   }
   virtual DenseMap<MCSymbol*, uintptr_t> *getLabelLocations() { return 0; }
+
+  DummyEmitter(unsigned initialSize = 1024)
+    : currentSize(initialSize) {
+    BufferBegin = 0;
+    resize();
+  }
+
+  ~DummyEmitter() {
+    delete []BufferBegin;
+  }
+
+  const std::map<MachineInstr *, Buffer> &bufferMap() const { return buffers; }
+
+ protected:
+  void resize() {
+    delete []BufferBegin;
+    BufferBegin = CurBufferPtr = new uint8_t[currentSize];
+    BufferEnd = &BufferBegin[currentSize];
+  }
+
+ private:
+  unsigned currentSize;
+  std::map<MachineInstr *, Buffer> buffers;
 };
 
 class X86EncodingEstimator : public EncodingEstimator {
@@ -1547,7 +1582,12 @@ class X86EncodingEstimator : public EncodingEstimator {
     return dummyCodeEmitter.execute(MF, &getAnalysis<MachineModuleInfo>());
   }
 
-  virtual Buffer getEstimatedEncoding(MachineInstr &MI) { return Buffer(); }
+  virtual Buffer getEstimatedEncoding(MachineInstr &MI) {
+    std::map<MachineInstr *, Buffer>::const_iterator I =
+      dummyEmitter.bufferMap().find(&MI);
+    assert(I != dummyEmitter.bufferMap().end());
+    return I->second;
+  }
 
  private:
   Emitter<DummyEmitter> dummyCodeEmitter;
