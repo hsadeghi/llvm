@@ -11,6 +11,7 @@
 #define DEBUG_TYPE "switching-scheduler"
 #include "llvm/CodeGen/SwitchingPriorityQueue.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/MathExtras.h"
 
 using namespace llvm;
 using namespace std;
@@ -29,18 +30,50 @@ struct CompareSwitching {
     assert(left->isInstr());
     assert(right->isInstr());
 
-    int leftOp = left->getInstr()->getOpcode();
-    int rightOp = right->getInstr()->getOpcode();
+    int leftScore = hammingScore(left->getInstr(), previousInst->getInstr());
+    int rightScore = hammingScore(right->getInstr(), previousInst->getInstr());
 
-    if (leftOp == previousOpcode && rightOp != previousOpcode) {
-      return true;
-    }
-    if (leftOp != previousOpcode && rightOp == previousOpcode) {
-      return false;
-    }
+    if (leftScore < rightScore) /* left is more expensive */ return false;
+    if (leftScore > rightScore) return true;
 
-    return right->NodeNum < left->NodeNum;
+    return left->NodeNum < right->NodeNum;
   }
+
+  bool getOnlyImmOperand(const MachineInstr *instr, int64_t *out_value) const {
+    bool found = false;
+    int64_t value = 0;
+    for (MachineInstr::const_mop_iterator I = instr->operands_begin(),
+           E = instr->operands_end();
+         I != E;
+         ++I) {
+      if (I->isImm()) {
+        if (found) return false; // More than one immediate operand
+
+        found = true;
+        value = I->getImm();
+      }
+    }
+    *out_value = value;
+    return true;
+  }
+
+  int hammingScore(const MachineInstr *a, const MachineInstr *b) const {
+    int score = 0;
+    if (a->getOpcode() == b->getOpcode()) score += kSameOp;
+    int64_t a_imm = 0, b_imm = 0;
+
+    getOnlyImmOperand(a, &a_imm);
+    getOnlyImmOperand(b, &b_imm);
+
+    score += kImmXorOnes * CountPopulation_64(a_imm ^ b_imm);
+
+    return score;
+  }
+
+  enum ScoreWeights {
+    kSameOp = 30,
+    kImmXorOnes = -2
+  };
 };
 
 void SwitchingPriorityQueue::scheduledNode(SUnit *SU) {
