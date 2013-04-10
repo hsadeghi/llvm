@@ -30,7 +30,7 @@ struct Buffer {
 class EncodingEstimator : public MachineFunctionPass {
 public:
   explicit EncodingEstimator(char &ID) : MachineFunctionPass(ID) { }
-  virtual Buffer getEstimatedEncoding(MachineInstr &MI) = 0;
+  virtual Buffer getEstimatedEncoding(const MachineInstr &MI) = 0;
   virtual ~EncodingEstimator() { }
 
   static AnalysisID getPassID();

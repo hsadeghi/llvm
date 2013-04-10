@@ -18,11 +18,12 @@ using namespace std;
 
 struct CompareSwitching {
   SUnit *previousInst;
-  int previousOpcode;
+  EncodingEstimator *encodingEstimator;
 
-  explicit CompareSwitching(SUnit *previous) : previousInst(previous) {
+  CompareSwitching(SUnit *previous, EncodingEstimator *estimator)
+    : previousInst(previous),
+      encodingEstimator(estimator) {
     assert(previousInst->isInstr());
-    previousOpcode = previousInst->getInstr()->getOpcode();
   }
 
   bool operator()(SUnit *left, SUnit *right) const {
@@ -67,6 +68,10 @@ struct CompareSwitching {
 
     score += kImmXorOnes * CountPopulation_64(a_imm ^ b_imm);
 
+    encodingEstimator->getEstimatedEncoding(*a);
+    encodingEstimator->getEstimatedEncoding(*b);
+    encodingEstimator->getEstimatedEncoding(*previousInst->getInstr());
+
     return score;
   }
 
@@ -89,7 +94,8 @@ SUnit *SwitchingPriorityQueue::pop() {
   vector<SUnit *>::iterator candidate = prior(queue.end());
 
   if (!unitsAlreadyScheduled.empty()) {
-    CompareSwitching comparator(unitsAlreadyScheduled.back());
+    CompareSwitching comparator(unitsAlreadyScheduled.back(),
+                                encodingEstimator);
     candidate = min_element(queue.begin(), queue.end(), comparator);
   }
 

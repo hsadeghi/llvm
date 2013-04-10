@@ -1102,6 +1102,8 @@ void Emitter<CodeEmitter>::emitInstruction(MachineInstr &MI,
                                            const MCInstrDesc *Desc) {
   DEBUG(dbgs() << MI);
 
+  MCE.startInstruction(MI);
+
   // If this is a pseudo instruction, lower it.
   switch (Desc->getOpcode()) {
   case X86::ADD16rr_DB:      Desc = UpdateOp(MI, II, X86::OR16rr); break;
@@ -1487,17 +1489,18 @@ void Emitter<CodeEmitter>::emitInstruction(MachineInstr &MI,
     llvm_unreachable(0);
   }
 
+  MCE.finishInstruction(MI);
+
   MCE.processDebugLoc(MI.getDebugLoc(), false);
 }
 
 class DummyEmitter : public JITCodeEmitter {
  public:
-  virtual void startFunction(MachineFunction &F) { }
+  virtual void startFunction(MachineFunction &F) { buffers.clear(); }
   virtual bool finishFunction(MachineFunction &F) {
     if (CurBufferPtr != BufferEnd) return false;
     currentSize *= 2;
     resize();
-    buffers.clear();
     return true;
   }
 
@@ -1548,7 +1551,9 @@ class DummyEmitter : public JITCodeEmitter {
     delete []BufferBegin;
   }
 
-  const std::map<MachineInstr *, Buffer> &bufferMap() const { return buffers; }
+  const std::map<const MachineInstr *, Buffer> &bufferMap() const {
+    return buffers;
+  }
 
  protected:
   void resize() {
@@ -1559,7 +1564,7 @@ class DummyEmitter : public JITCodeEmitter {
 
  private:
   unsigned currentSize;
-  std::map<MachineInstr *, Buffer> buffers;
+  std::map<const MachineInstr *, Buffer> buffers;
 };
 
 class X86EncodingEstimator : public EncodingEstimator {
@@ -1582,10 +1587,22 @@ class X86EncodingEstimator : public EncodingEstimator {
     return dummyCodeEmitter.execute(MF, &getAnalysis<MachineModuleInfo>());
   }
 
-  virtual Buffer getEstimatedEncoding(MachineInstr &MI) {
-    std::map<MachineInstr *, Buffer>::const_iterator I =
+  virtual Buffer getEstimatedEncoding(const MachineInstr &MI) {
+    std::map<const MachineInstr *, Buffer>::const_iterator I =
       dummyEmitter.bufferMap().find(&MI);
-    assert(I != dummyEmitter.bufferMap().end());
+#ifndef NDEBUG
+    if (I == dummyEmitter.bufferMap().end()) {
+      for (std::map<const MachineInstr *, Buffer>::const_iterator I =
+             dummyEmitter.bufferMap().begin(),
+             E = dummyEmitter.bufferMap().end();
+           I != E;
+           ++I) {
+        errs() << *I->first << "\n";
+      }
+      errs() << "\nNot found: " << MI << "\n";
+      abort();
+    }
+#endif
     return I->second;
   }
 
