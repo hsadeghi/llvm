@@ -62,6 +62,7 @@ namespace {
       MCE(mce), PICBaseOffset(0), Is64BitMode(is64),
       IsPIC(TM.getRelocationModel() == Reloc::PIC_) {}
 
+    bool execute(MachineFunction &MF, MachineModuleInfo *MMI);
     bool runOnMachineFunction(MachineFunction &MF);
 
     virtual const char *getPassName() const {
@@ -133,7 +134,13 @@ FunctionPass *llvm::createX86JITCodeEmitterPass(X86TargetMachine &TM,
 
 template<class CodeEmitter>
 bool Emitter<CodeEmitter>::runOnMachineFunction(MachineFunction &MF) {
-  MMI = &getAnalysis<MachineModuleInfo>();
+  return execute(MF, &getAnalysis<MachineModuleInfo>());
+}
+
+template<class CodeEmitter>
+bool Emitter<CodeEmitter>::execute(MachineFunction &MF,
+                                   MachineModuleInfo *mmi) {
+  MMI = mmi;
   MCE.setModuleInfo(MMI);
 
   II = TM.getInstrInfo();
@@ -1486,7 +1493,7 @@ void Emitter<CodeEmitter>::emitInstruction(MachineInstr &MI,
 class DummyEmitter : public JITCodeEmitter {
 public:
   virtual void startFunction(MachineFunction &F) { }
-  virtual bool finishFunction(MachineFunction &F) { return true; }
+  virtual bool finishFunction(MachineFunction &F) { return false; }
 
   virtual void startInstruction(MachineInstr &MI) { }
   virtual void finishInstruction(MachineInstr &MI) { }
@@ -1536,7 +1543,9 @@ class X86EncodingEstimator : public EncodingEstimator {
     dummyCodeEmitter.getAnalysisUsage(AU);
   }
 
-  bool runOnMachineFunction(MachineFunction &MF) { return false; }
+  bool runOnMachineFunction(MachineFunction &MF) {
+    return dummyCodeEmitter.execute(MF, &getAnalysis<MachineModuleInfo>());
+  }
 
   virtual Buffer getEstimatedEncoding(MachineInstr &MI) { return Buffer(); }
 
