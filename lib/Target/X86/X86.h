@@ -70,6 +70,9 @@ ImmutablePass *createX86TargetTransformInfoPass(const X86TargetMachine *TM);
 /// with NOOPs. This will prevent a stall when returning on the Atom.
 FunctionPass *createX86PadShortFunctions();
 
+FunctionPass *createX86EncodingEstimator(X86TargetMachine &TM);
+AnalysisID getX86EncodingEstimatorID();
+
 } // End llvm namespace
 
 #endif

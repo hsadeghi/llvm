@@ -13,6 +13,7 @@
 
 #include "X86TargetMachine.h"
 #include "X86.h"
+#include "llvm/CodeGen/EncodingEstimator.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/PassManager.h"
@@ -158,6 +159,7 @@ public:
   virtual bool addILPOpts();
   virtual bool addPreRegAlloc();
   virtual bool addPostRegAlloc();
+  virtual bool addPreSched2();
   virtual bool addPreEmitPass();
 };
 } // namespace
@@ -198,6 +200,11 @@ bool X86PassConfig::addPostRegAlloc() {
   return true;  // -print-machineinstr should print after this.
 }
 
+bool X86PassConfig::addPreSched2() {
+  addPass(createX86EncodingEstimator(getX86TargetMachine()));
+  return false;
+}
+
 bool X86PassConfig::addPreEmitPass() {
   bool ShouldPrint = false;
   if (getOptLevel() != CodeGenOpt::None && getX86Subtarget().hasSSE2()) {
@@ -224,4 +231,8 @@ bool X86TargetMachine::addCodeEmitter(PassManagerBase &PM,
   PM.add(createX86JITCodeEmitterPass(*this, JCE));
 
   return false;
+}
+
+AnalysisID EncodingEstimator::getPassID() {
+  return getX86EncodingEstimatorID();
 }

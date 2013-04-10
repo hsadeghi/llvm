@@ -20,6 +20,7 @@
 #include "X86Subtarget.h"
 #include "X86TargetMachine.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/CodeGen/EncodingEstimator.h"
 #include "llvm/CodeGen/JITCodeEmitter.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineInstr.h"
@@ -1480,4 +1481,76 @@ void Emitter<CodeEmitter>::emitInstruction(MachineInstr &MI,
   }
 
   MCE.processDebugLoc(MI.getDebugLoc(), false);
+}
+
+class DummyEmitter : public JITCodeEmitter {
+public:
+  virtual void startFunction(MachineFunction &F) { }
+  virtual bool finishFunction(MachineFunction &F) { return true; }
+
+  virtual void startInstruction(MachineInstr &MI) { }
+  virtual void finishInstruction(MachineInstr &MI) { }
+
+  virtual void addRelocation(const MachineRelocation &MR) { }
+
+  virtual uintptr_t getConstantPoolEntryAddress(unsigned Index) const {
+    return 0;
+  }
+
+  virtual uintptr_t getJumpTableEntryAddress(unsigned Index) const { return 0; }
+
+  virtual uintptr_t getMachineBasicBlockAddress(MachineBasicBlock *MBB) const {
+    return 0;
+  }
+
+  virtual uintptr_t getLabelAddress(MCSymbol *Label) const { return 0; }
+
+  virtual void setModuleInfo(MachineModuleInfo *Info) { }
+
+  virtual void emitLabel(MCSymbol *) { }
+
+  virtual void StartMachineBasicBlock(MachineBasicBlock *) { }
+  virtual void *allocateGlobal(uintptr_t, unsigned int) {
+    return NULL;
+  }
+  virtual void *allocIndirectGV(const GlobalValue*, const uint8_t *, size_t,
+                                unsigned) {
+    return NULL;
+  }
+  virtual DenseMap<MCSymbol*, uintptr_t> *getLabelLocations() { return 0; }
+};
+
+class X86EncodingEstimator : public EncodingEstimator {
+ public:
+  static char ID;
+
+  X86EncodingEstimator(X86TargetMachine &tm)
+    : EncodingEstimator(ID),
+      dummyCodeEmitter(tm, dummyEmitter) { }
+
+  virtual const char *getPassName() const {
+    return "X86 Encoding Estimator";
+  }
+
+  void getAnalysisUsage(AnalysisUsage &AU) const {
+    dummyCodeEmitter.getAnalysisUsage(AU);
+  }
+
+  bool runOnMachineFunction(MachineFunction &MF) { return false; }
+
+  virtual Buffer getEstimatedEncoding(MachineInstr &MI) { return Buffer(); }
+
+ private:
+  Emitter<DummyEmitter> dummyCodeEmitter;
+  DummyEmitter dummyEmitter;
+};
+
+char X86EncodingEstimator::ID = 0;
+
+FunctionPass *llvm::createX86EncodingEstimator(X86TargetMachine &TM) {
+  return new X86EncodingEstimator(TM);
+}
+
+AnalysisID llvm::getX86EncodingEstimatorID() {
+  return &X86EncodingEstimator::ID;
 }

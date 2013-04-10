@@ -14,6 +14,8 @@
 #ifndef X86TARGETMACHINE_H
 #define X86TARGETMACHINE_H
 
+#include <iostream>
+
 #include "X86.h"
 #include "X86FrameLowering.h"
 #include "X86ISelLowering.h"
@@ -72,6 +74,10 @@ public:
 
   virtual bool addCodeEmitter(PassManagerBase &PM,
                               JITCodeEmitter &JCE);
+
+  virtual AnalysisID getEncodingEstimatorPassID() const {
+    return getX86EncodingEstimatorID();
+  }
 };
 
 /// X86_32TargetMachine - X86 32-bit target machine.

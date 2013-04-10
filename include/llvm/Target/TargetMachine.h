@@ -276,6 +276,8 @@ public:
                                  bool /*DisableVerify*/ = true) {
     return true;
   }
+
+  virtual AnalysisID getEncodingEstimatorPassID() const { return 0; }
 };
 
 /// LLVMTargetMachine - This class describes a target machine that is

@@ -29,6 +29,7 @@ class MachineBasicBlock;
 class MachineConstantPool;
 class MachineJumpTableInfo;
 class MachineFunction;
+class MachineInstr;
 class MachineModuleInfo;
 class MachineRelocation;
 class Value;
@@ -67,6 +68,9 @@ public:
   /// false.
   ///
   virtual bool finishFunction(MachineFunction &F) = 0;
+
+  virtual void startInstruction(MachineInstr &MI) { }
+  virtual void finishInstruction(MachineInstr &MI) { }
   
   /// allocIndirectGV - Allocates and fills storage for an indirect
   /// GlobalValue, and returns the address.

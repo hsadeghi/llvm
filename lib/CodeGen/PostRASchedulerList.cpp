@@ -26,6 +26,7 @@
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/AliasAnalysis.h"
+#include "llvm/CodeGen/EncodingEstimator.h"
 #include "llvm/CodeGen/LatencyPriorityQueue.h"
 #include "llvm/CodeGen/MachineDominators.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
@@ -87,10 +88,12 @@ namespace {
   class PostRAScheduler : public MachineFunctionPass {
     const TargetInstrInfo *TII;
     RegisterClassInfo RegClassInfo;
+    bool canOptimizeEnergy;
+    EncodingEstimator *encodingEstimator;
 
   public:
     static char ID;
-    PostRAScheduler() : MachineFunctionPass(ID) {}
+    PostRAScheduler() : MachineFunctionPass(ID), canOptimizeEnergy(false) {}
 
     void getAnalysisUsage(AnalysisUsage &AU) const {
       AU.setPreservesCFG();
@@ -100,6 +103,7 @@ namespace {
       AU.addPreserved<MachineDominatorTree>();
       AU.addRequired<MachineLoopInfo>();
       AU.addPreserved<MachineLoopInfo>();
+      AU.addRequiredID(EncodingEstimator::getPassID());
       MachineFunctionPass::getAnalysisUsage(AU);
     }
 
@@ -268,10 +272,11 @@ void SchedulePostRATDList<PQ>::dumpSchedule() const {
 
 bool PostRAScheduler::runOnMachineFunction(MachineFunction &Fn) {
   if (OptimizeForPower) {
+    encodingEstimator =
+      &getAnalysisID<EncodingEstimator>(EncodingEstimator::getPassID());
     return runScheduler<SwitchingPriorityQueue>(Fn);
-  } else {
-    return runScheduler<LatencyPriorityQueue>(Fn);
   }
+  return runScheduler<LatencyPriorityQueue>(Fn);
 }
 
 template<typename PriorityQueue>
